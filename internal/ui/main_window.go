@@ -34,6 +34,8 @@ type MainWindow struct {
 	OnDeleteFile func(fileID string) error
 	OnRefreshFiles func() ([]models.FileMetadata, error)
 	OnGeneratePresignedURL func(fileID string, expiration time.Duration) (string, error)
+	OnSaveSettings func(settings *models.ApplicationSettings) error
+	OnLoadSettings func() (*models.ApplicationSettings, error)
 }
 
 // NewMainWindow creates a new main window
@@ -81,6 +83,14 @@ func (mw *MainWindow) SetOnRefreshFiles(callback func() ([]models.FileMetadata, 
 
 func (mw *MainWindow) SetOnGeneratePresignedURL(callback func(fileID string, expiration time.Duration) (string, error)) {
 	mw.OnGeneratePresignedURL = callback
+}
+
+func (mw *MainWindow) SetOnSaveSettings(callback func(settings *models.ApplicationSettings) error) {
+	mw.OnSaveSettings = callback
+}
+
+func (mw *MainWindow) SetOnLoadSettings(callback func() (*models.ApplicationSettings, error)) {
+	mw.OnLoadSettings = callback
 }
 
 // UpdateFiles updates the file list display
@@ -334,8 +344,14 @@ func (mw *MainWindow) showSharingDialog(file models.FileMetadata) {
 }
 
 func (mw *MainWindow) showSettingsDialog() {
-	// Placeholder for settings dialog
-	dialog.ShowInformation("Settings", "Settings dialog will be implemented in a future task.", mw.window)
+	settingsDialog := NewSettingsDialog(mw.window)
+	
+	// Set callbacks if they are available
+	if mw.OnLoadSettings != nil && mw.OnSaveSettings != nil {
+		settingsDialog.SetCallbacks(mw.OnSaveSettings, mw.OnLoadSettings)
+	}
+	
+	settingsDialog.Show()
 }
 
 func (mw *MainWindow) refreshFiles() {

@@ -84,9 +84,10 @@ func initializeApplication(cfg *config.AppConfig, mainWindow *ui.MainWindow, log
 	fileManager := manager.NewFileManager(database, s3Service)
 	shareManager := manager.NewShareManager(database, s3Service)
 	expirationManager := manager.NewExpirationManager(database)
+	settingsManager := manager.NewSettingsManager(database)
 
 	// Create application controller
-	controller := app.NewController(fileManager, shareManager, expirationManager, mainWindow)
+	controller := app.NewController(fileManager, shareManager, expirationManager, settingsManager, mainWindow)
 
 	// Update UI status based on AWS credentials configuration
 	if !credentialsConfigured {

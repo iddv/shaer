@@ -24,6 +24,8 @@ type MainWindowInterface interface {
 	SetOnDeleteFile(callback func(fileID string) error)
 	SetOnRefreshFiles(callback func() ([]models.FileMetadata, error))
 	SetOnGeneratePresignedURL(callback func(fileID string, expiration time.Duration) (string, error))
+	SetOnSaveSettings(callback func(settings *models.ApplicationSettings) error)
+	SetOnLoadSettings(callback func() (*models.ApplicationSettings, error))
 }
 
 // Controller coordinates between UI and business logic layers
@@ -32,6 +34,7 @@ type Controller struct {
 	fileManager       manager.FileManager
 	shareManager      manager.ShareManager
 	expirationManager manager.ExpirationManager
+	settingsManager   manager.SettingsManager
 	
 	// UI components
 	mainWindow MainWindowInterface
@@ -49,6 +52,7 @@ func NewController(
 	fileManager manager.FileManager,
 	shareManager manager.ShareManager,
 	expirationManager manager.ExpirationManager,
+	settingsManager manager.SettingsManager,
 	mainWindow MainWindowInterface,
 ) *Controller {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -57,6 +61,7 @@ func NewController(
 		fileManager:       fileManager,
 		shareManager:      shareManager,
 		expirationManager: expirationManager,
+		settingsManager:   settingsManager,
 		mainWindow:        mainWindow,
 		logger:            logger.New(),
 		ctx:               ctx,
@@ -102,6 +107,8 @@ func (c *Controller) setupUICallbacks() {
 	c.mainWindow.SetOnDeleteFile(c.handleDeleteFile)
 	c.mainWindow.SetOnRefreshFiles(c.handleRefreshFiles)
 	c.mainWindow.SetOnGeneratePresignedURL(c.GeneratePresignedURL)
+	c.mainWindow.SetOnSaveSettings(c.handleSaveSettings)
+	c.mainWindow.SetOnLoadSettings(c.handleLoadSettings)
 }
 
 // handleUploadFile handles file upload requests from UI
@@ -307,4 +314,32 @@ func (c *Controller) GeneratePresignedURL(fileID string, expiration time.Duratio
 // GetShareHistory retrieves sharing history for a file
 func (c *Controller) GetShareHistory(fileID string) ([]*storage.ShareRecord, error) {
 	return c.shareManager.GetShareHistory(fileID)
+}
+
+// handleSaveSettings handles settings save requests from UI
+func (c *Controller) handleSaveSettings(settings *models.ApplicationSettings) error {
+	c.logger.Info("Saving application settings")
+	
+	err := c.settingsManager.SaveSettings(settings)
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("Failed to save settings: %v", err))
+		return fmt.Errorf("failed to save settings: %w", err)
+	}
+	
+	c.logger.Info("Application settings saved successfully")
+	return nil
+}
+
+// handleLoadSettings handles settings load requests from UI
+func (c *Controller) handleLoadSettings() (*models.ApplicationSettings, error) {
+	c.logger.Info("Loading application settings")
+	
+	settings, err := c.settingsManager.LoadSettings()
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("Failed to load settings: %v", err))
+		return nil, fmt.Errorf("failed to load settings: %w", err)
+	}
+	
+	c.logger.Info("Application settings loaded successfully")
+	return settings, nil
 }
