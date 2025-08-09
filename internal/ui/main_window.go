@@ -33,6 +33,7 @@ type MainWindow struct {
 	OnShareFile  func(fileID string, recipients []string, message string) error
 	OnDeleteFile func(fileID string) error
 	OnRefreshFiles func() ([]models.FileMetadata, error)
+	OnGeneratePresignedURL func(fileID string, expiration time.Duration) (string, error)
 }
 
 // NewMainWindow creates a new main window
@@ -56,9 +57,45 @@ func (mw *MainWindow) Show() {
 	mw.window.ShowAndRun()
 }
 
+// GetWindow returns the underlying Fyne window
+func (mw *MainWindow) GetWindow() fyne.Window {
+	return mw.window
+}
+
+// Callback setters for interface compliance
+func (mw *MainWindow) SetOnUploadFile(callback func(filePath string, expiration time.Duration) error) {
+	mw.OnUploadFile = callback
+}
+
+func (mw *MainWindow) SetOnShareFile(callback func(fileID string, recipients []string, message string) error) {
+	mw.OnShareFile = callback
+}
+
+func (mw *MainWindow) SetOnDeleteFile(callback func(fileID string) error) {
+	mw.OnDeleteFile = callback
+}
+
+func (mw *MainWindow) SetOnRefreshFiles(callback func() ([]models.FileMetadata, error)) {
+	mw.OnRefreshFiles = callback
+}
+
+func (mw *MainWindow) SetOnGeneratePresignedURL(callback func(fileID string, expiration time.Duration) (string, error)) {
+	mw.OnGeneratePresignedURL = callback
+}
+
 // UpdateFiles updates the file list display
 func (mw *MainWindow) UpdateFiles(files []models.FileMetadata) {
 	mw.files = files
+	mw.fileList.Refresh()
+	
+	// Update empty state visibility
+	mw.updateEmptyState()
+}
+
+// updateEmptyState shows/hides the empty state based on file count
+func (mw *MainWindow) updateEmptyState() {
+	// This would need to be implemented with proper empty state handling
+	// For now, just refresh the list
 	mw.fileList.Refresh()
 }
 
@@ -314,9 +351,23 @@ func (mw *MainWindow) refreshFiles() {
 }
 
 func (mw *MainWindow) copyFileLink(fileID string) {
-	// This would generate and copy the presigned URL
-	// For now, show a placeholder
-	dialog.ShowInformation("Copy Link", "Link copied to clipboard (functionality will be implemented in future task)", mw.window)
+	// Generate presigned URL and copy to clipboard
+	if mw.OnGeneratePresignedURL != nil {
+		go func() {
+			// Generate URL with 24 hour expiration
+			url, err := mw.OnGeneratePresignedURL(fileID, 24*time.Hour)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("Failed to generate sharing link: %v", err), mw.window)
+				return
+			}
+			
+			// Copy to clipboard
+			mw.window.Clipboard().SetContent(url)
+			dialog.ShowInformation("Link Copied", "Sharing link has been copied to clipboard", mw.window)
+		}()
+	} else {
+		dialog.ShowInformation("Copy Link", "Link generation not available - AWS not configured", mw.window)
+	}
 }
 
 func (mw *MainWindow) confirmDeleteFile(file models.FileMetadata) {

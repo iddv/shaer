@@ -208,13 +208,6 @@ func (d *FileUploadDialog) uploadFile() {
 	
 	// Start upload in goroutine
 	go func() {
-		// Simulate progress updates (in real implementation, this would come from the upload callback)
-		for i := 0; i <= 10; i++ {
-			time.Sleep(100 * time.Millisecond)
-			progress := float64(i) / 10.0
-			d.progressBar.SetValue(progress)
-		}
-		
 		// Call the upload callback
 		if err := d.onUpload(d.selectedFile, expiration); err != nil {
 			// Show error dialog
@@ -226,7 +219,7 @@ func (d *FileUploadDialog) uploadFile() {
 			d.uploadBtn.Enable()
 			d.cancelBtn.Enable()
 		} else {
-			// Success - progress bar will show completion
+			// Success - show completion
 			d.SetProgress(1.0)
 		}
 	}()
