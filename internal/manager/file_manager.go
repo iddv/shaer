@@ -12,6 +12,7 @@ import (
 	"file-sharing-app/internal/aws"
 	"file-sharing-app/internal/models"
 	"file-sharing-app/internal/storage"
+	"file-sharing-app/pkg/logger"
 )
 
 // FileManager interface defines the contract for file metadata management
@@ -42,12 +43,16 @@ type FileManager interface {
 	
 	// UploadFile uploads a file to S3 and stores metadata locally
 	UploadFile(ctx context.Context, filePath string, expiration time.Duration, progressCh chan<- aws.UploadProgress) (*models.FileMetadata, error)
+	
+	// GeneratePresignedURL generates a presigned URL for file sharing
+	GeneratePresignedURL(ctx context.Context, fileID string, expiration time.Duration) (string, error)
 }
 
 // FileManagerImpl implements the FileManager interface
 type FileManagerImpl struct {
 	db        storage.Database
 	s3Service aws.S3Service
+	logger    *logger.Logger
 }
 
 // NewFileManager creates a new FileManager instance
@@ -55,13 +60,15 @@ func NewFileManager(db storage.Database, s3Service aws.S3Service) FileManager {
 	return &FileManagerImpl{
 		db:        db,
 		s3Service: s3Service,
+		logger:    logger.New(),
 	}
 }
 
 // NewFileManagerWithoutS3 creates a new FileManager instance without S3 service (for testing)
 func NewFileManagerWithoutS3(db storage.Database) FileManager {
 	return &FileManagerImpl{
-		db: db,
+		db:     db,
+		logger: logger.New(),
 	}
 }
 
@@ -335,4 +342,86 @@ func generateS3Key(fileName string) string {
 	s3Key := fmt.Sprintf("uploads/%s/%s%s", timestampPrefix, fileUUID, ext)
 	
 	return s3Key
+}
+
+// GeneratePresignedURL generates a presigned URL for file sharing
+func (fm *FileManagerImpl) GeneratePresignedURL(ctx context.Context, fileID string, expiration time.Duration) (string, error) {
+	if fileID == "" {
+		return "", fmt.Errorf("file ID cannot be empty")
+	}
+	
+	if expiration <= 0 {
+		return "", fmt.Errorf("expiration duration must be positive")
+	}
+	
+	if fm.s3Service == nil {
+		return "", fmt.Errorf("S3 service not configured")
+	}
+	
+	// Get file metadata to retrieve S3 key
+	file, err := fm.GetFile(fileID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get file metadata: %w", err)
+	}
+	
+	// Check if file is active (not expired or deleted)
+	if file.Status != models.StatusActive {
+		return "", fmt.Errorf("cannot generate presigned URL for file with status: %s", file.Status)
+	}
+	
+	// Check if file has already expired
+	if time.Now().After(file.ExpirationDate) {
+		return "", fmt.Errorf("file has expired and cannot be shared")
+	}
+	
+	// Ensure presigned URL expiration doesn't exceed file expiration (requirement 3.4)
+	timeUntilFileExpires := time.Until(file.ExpirationDate)
+	if expiration > timeUntilFileExpires {
+		expiration = timeUntilFileExpires
+		fm.logger.Info(fmt.Sprintf("Adjusted presigned URL expiration to match file expiration for file %s", fileID))
+	}
+	
+	// Generate presigned URL using S3 service
+	presignedURL, err := fm.s3Service.GeneratePresignedURL(ctx, file.S3Key, expiration)
+	if err != nil {
+		fm.logger.Error(fmt.Sprintf("Failed to generate presigned URL for file %s: %v", fileID, err))
+		return "", fmt.Errorf("failed to generate presigned URL: %w", err)
+	}
+	
+	// Log successful presigned URL generation (requirement: basic logging)
+	fm.logger.Info(fmt.Sprintf("Generated presigned URL for file %s (S3 key: %s) with expiration: %v", 
+		fileID, file.S3Key, expiration))
+	
+	// Create share record to store presigned URL metadata in database
+	shareRecord := &models.ShareRecord{
+		ID:            uuid.New().String(),
+		FileID:        fileID,
+		Recipients:    []string{}, // Empty for now, will be populated when sharing with specific recipients
+		Message:       "",         // Empty for now, will be populated when sharing with custom message
+		SharedDate:    time.Now(),
+		PresignedURL:  presignedURL,
+		URLExpiration: time.Now().Add(expiration),
+	}
+	
+	// Convert models.ShareRecord to storage.ShareRecord and save to database
+	storageShareRecord := &storage.ShareRecord{
+		ID:            shareRecord.ID,
+		FileID:        shareRecord.FileID,
+		Recipients:    shareRecord.Recipients,
+		Message:       shareRecord.Message,
+		SharedDate:    shareRecord.SharedDate,
+		PresignedURL:  shareRecord.PresignedURL,
+		URLExpiration: shareRecord.URLExpiration,
+	}
+	
+	err = fm.db.SaveShare(storageShareRecord)
+	if err != nil {
+		fm.logger.Error(fmt.Sprintf("Failed to save share record for file %s: %v", fileID, err))
+		// Don't fail the operation if we can't save the share record, just log the error
+		// The presigned URL is still valid and can be used
+	} else {
+		fm.logger.Info(fmt.Sprintf("Saved share record %s for file %s", shareRecord.ID, fileID))
+	}
+	
+	return presignedURL, nil
 }

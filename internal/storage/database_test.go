@@ -185,6 +185,51 @@ func TestSQLiteDatabase_UpdateFileStatus_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "file not found")
 }
 
+func TestSQLiteDatabase_UpdateFileExpiration(t *testing.T) {
+	db, _ := createTempDatabase(t)
+	defer db.Close()
+
+	// Save a file first
+	originalExpiration := time.Now().Add(24 * time.Hour)
+	file := &FileMetadata{
+		ID:             "test-id-expiration",
+		FileName:       "test-expiration.txt",
+		FilePath:       "/tmp/test-expiration.txt",
+		FileSize:       1024,
+		UploadDate:     time.Now(),
+		ExpirationDate: originalExpiration,
+		S3Key:          "uploads/test-expiration.txt",
+		Status:         StatusActive,
+	}
+
+	err := db.SaveFile(file)
+	require.NoError(t, err)
+
+	// Update expiration date
+	newExpiration := time.Now().Add(48 * time.Hour)
+	err = db.UpdateFileExpiration("test-id-expiration", newExpiration)
+	assert.NoError(t, err)
+
+	// Verify the expiration was updated
+	retrievedFile, err := db.GetFile("test-id-expiration")
+	require.NoError(t, err)
+	
+	// Compare with some tolerance for time precision
+	timeDiff := retrievedFile.ExpirationDate.Sub(newExpiration)
+	assert.True(t, timeDiff < time.Second && timeDiff > -time.Second, 
+		"Expected expiration date to be close to %v, got %v", newExpiration, retrievedFile.ExpirationDate)
+}
+
+func TestSQLiteDatabase_UpdateFileExpiration_NotFound(t *testing.T) {
+	db, _ := createTempDatabase(t)
+	defer db.Close()
+
+	newExpiration := time.Now().Add(48 * time.Hour)
+	err := db.UpdateFileExpiration("non-existent-id", newExpiration)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "file not found")
+}
+
 func TestSQLiteDatabase_DeleteFile(t *testing.T) {
 	db, _ := createTempDatabase(t)
 	defer db.Close()

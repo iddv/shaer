@@ -70,7 +70,7 @@ func (m *mockS3Service) GeneratePresignedURL(ctx context.Context, key string, ex
 	if m.shouldError {
 		return "", fmt.Errorf(m.errorMsg)
 	}
-	return fmt.Sprintf("https://test-bucket.s3.amazonaws.com/%s?expires=%d", key, expiration), nil
+	return fmt.Sprintf("https://test-bucket.s3.amazonaws.com/%s?expires=%d", key, int64(expiration.Seconds())), nil
 }
 
 func (m *mockS3Service) DeleteObject(ctx context.Context, key string) error {
@@ -1098,4 +1098,313 @@ func TestFileManager_UploadFile_Integration(t *testing.T) {
 		finalProgress := progressUpdates[len(progressUpdates)-1]
 		assert.Equal(t, float64(100), finalProgress.Percentage)
 	}
+}
+
+func TestFileManager_GeneratePresignedURL(t *testing.T) {
+	db, _ := createTempDatabase(t)
+	defer db.Close()
+	
+	mockS3 := newMockS3Service()
+	fm := NewFileManager(db, mockS3)
+	
+	ctx := context.Background()
+	
+	// Create a test file record
+	now := time.Now()
+	testFile := &models.FileMetadata{
+		ID:             "test-file-id",
+		FileName:       "test.txt",
+		FilePath:       "/tmp/test.txt",
+		FileSize:       1024,
+		UploadDate:     now,
+		ExpirationDate: now.Add(24 * time.Hour),
+		S3Key:          "uploads/2024/01/01/test-uuid.txt",
+		Status:         models.StatusActive,
+	}
+	
+	err := fm.SaveFile(testFile)
+	require.NoError(t, err)
+	
+	tests := []struct {
+		name           string
+		fileID         string
+		expiration     time.Duration
+		setupMock      func(*mockS3Service)
+		setupFile      func(*models.FileMetadata)
+		expectError    bool
+		expectedErrMsg string
+	}{
+		{
+			name:        "successful URL generation",
+			fileID:      "test-file-id",
+			expiration:  1 * time.Hour,
+			expectError: false,
+		},
+		{
+			name:           "empty file ID",
+			fileID:         "",
+			expiration:     1 * time.Hour,
+			expectError:    true,
+			expectedErrMsg: "file ID cannot be empty",
+		},
+		{
+			name:           "zero expiration",
+			fileID:         "test-file-id",
+			expiration:     0,
+			expectError:    true,
+			expectedErrMsg: "expiration duration must be positive",
+		},
+		{
+			name:           "negative expiration",
+			fileID:         "test-file-id",
+			expiration:     -1 * time.Hour,
+			expectError:    true,
+			expectedErrMsg: "expiration duration must be positive",
+		},
+		{
+			name:           "non-existent file",
+			fileID:         "non-existent-id",
+			expiration:     1 * time.Hour,
+			expectError:    true,
+			expectedErrMsg: "failed to get file metadata",
+		},
+		{
+			name:       "inactive file",
+			fileID:     "test-file-id",
+			expiration: 1 * time.Hour,
+			setupFile: func(file *models.FileMetadata) {
+				file.Status = models.StatusUploading
+				// Update the file in database
+				db.UpdateFileStatus(file.ID, storage.FileStatus(file.Status))
+			},
+			expectError:    true,
+			expectedErrMsg: "cannot generate presigned URL for file with status: uploading",
+		},
+		{
+			name:       "expired file",
+			fileID:     "test-file-id",
+			expiration: 1 * time.Hour,
+			setupFile: func(file *models.FileMetadata) {
+				file.ExpirationDate = now.Add(-1 * time.Hour) // Already expired
+				file.Status = models.StatusActive // Keep status as active to test expiration check
+				// Update the file in database with expired date
+				err := db.UpdateFileExpiration(file.ID, file.ExpirationDate)
+				require.NoError(t, err)
+			},
+			expectError:    true,
+			expectedErrMsg: "file has expired and cannot be shared",
+		},
+		{
+			name:       "expiration exceeds file expiration",
+			fileID:     "test-file-id",
+			expiration: 48 * time.Hour, // Longer than file expiration (24 hours)
+			expectError: false,
+		},
+		{
+			name:       "S3 service error",
+			fileID:     "test-file-id",
+			expiration: 1 * time.Hour,
+			setupMock: func(m *mockS3Service) {
+				m.shouldError = true
+				m.errorMsg = "S3 presigned URL generation failed"
+			},
+			expectError:    true,
+			expectedErrMsg: "failed to generate presigned URL",
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset mock
+			mockS3.shouldError = false
+			mockS3.errorMsg = ""
+			
+			// Reset file state to active before each test
+			testFile.Status = models.StatusActive
+			testFile.ExpirationDate = now.Add(24 * time.Hour)
+			// Update status and expiration in database
+			err := db.UpdateFileStatus(testFile.ID, storage.StatusActive)
+			require.NoError(t, err)
+			err = db.UpdateFileExpiration(testFile.ID, testFile.ExpirationDate)
+			require.NoError(t, err)
+			
+			// Setup mock if needed
+			if tt.setupMock != nil {
+				tt.setupMock(mockS3)
+			}
+			
+			// Setup file if needed
+			if tt.setupFile != nil {
+				tt.setupFile(testFile)
+			}
+			
+			// Generate presigned URL
+			url, err := fm.GeneratePresignedURL(ctx, tt.fileID, tt.expiration)
+			
+			if tt.expectError {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedErrMsg)
+				assert.Empty(t, url)
+			} else {
+				assert.NoError(t, err)
+				assert.NotEmpty(t, url)
+				assert.Contains(t, url, "https://test-bucket.s3.amazonaws.com/")
+				assert.Contains(t, url, testFile.S3Key)
+				assert.Contains(t, url, "expires=")
+				
+				// Verify share record was created in database
+				shareHistory, err := db.GetShareHistory(tt.fileID)
+				assert.NoError(t, err)
+				assert.NotEmpty(t, shareHistory)
+				
+				// Find the most recent share record
+				var latestShare *storage.ShareRecord
+				for _, share := range shareHistory {
+					if latestShare == nil || share.SharedDate.After(latestShare.SharedDate) {
+						latestShare = share
+					}
+				}
+				
+				assert.NotNil(t, latestShare)
+				assert.Equal(t, tt.fileID, latestShare.FileID)
+				assert.Equal(t, url, latestShare.PresignedURL)
+				assert.Empty(t, latestShare.Recipients) // Should be empty for basic URL generation
+				assert.Empty(t, latestShare.Message)    // Should be empty for basic URL generation
+				assert.False(t, latestShare.SharedDate.IsZero())
+				assert.False(t, latestShare.URLExpiration.IsZero())
+			}
+		})
+	}
+}
+
+func TestFileManager_GeneratePresignedURL_WithoutS3Service(t *testing.T) {
+	db, _ := createTempDatabase(t)
+	defer db.Close()
+	
+	// Create FileManager without S3 service
+	fm := NewFileManagerWithoutS3(db)
+	
+	ctx := context.Background()
+	
+	// Create a test file record
+	testFile := &models.FileMetadata{
+		ID:             "test-file-id",
+		FileName:       "test.txt",
+		FilePath:       "/tmp/test.txt",
+		FileSize:       1024,
+		UploadDate:     time.Now(),
+		ExpirationDate: time.Now().Add(24 * time.Hour),
+		S3Key:          "uploads/test.txt",
+		Status:         models.StatusActive,
+	}
+	
+	err := fm.SaveFile(testFile)
+	require.NoError(t, err)
+	
+	// Try to generate presigned URL without S3 service
+	url, err := fm.GeneratePresignedURL(ctx, "test-file-id", 1*time.Hour)
+	
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "S3 service not configured")
+	assert.Empty(t, url)
+}
+
+func TestFileManager_GeneratePresignedURL_ExpirationAdjustment(t *testing.T) {
+	db, _ := createTempDatabase(t)
+	defer db.Close()
+	
+	mockS3 := newMockS3Service()
+	fm := NewFileManager(db, mockS3)
+	
+	ctx := context.Background()
+	now := time.Now()
+	
+	// Create a test file that expires in 2 hours
+	testFile := &models.FileMetadata{
+		ID:             "test-file-id",
+		FileName:       "test.txt",
+		FilePath:       "/tmp/test.txt",
+		FileSize:       1024,
+		UploadDate:     now,
+		ExpirationDate: now.Add(2 * time.Hour), // File expires in 2 hours
+		S3Key:          "uploads/test.txt",
+		Status:         models.StatusActive,
+	}
+	
+	err := fm.SaveFile(testFile)
+	require.NoError(t, err)
+	
+	// Request presigned URL with 4 hour expiration (longer than file expiration)
+	url, err := fm.GeneratePresignedURL(ctx, "test-file-id", 4*time.Hour)
+	
+	assert.NoError(t, err)
+	assert.NotEmpty(t, url)
+	
+	// Verify that the expiration was adjusted to match file expiration
+	// The URL should contain the adjusted expiration (approximately 2 hours = 7200 seconds)
+	assert.Contains(t, url, "expires=")
+	
+	// Verify share record was created with adjusted expiration
+	shareHistory, err := db.GetShareHistory("test-file-id")
+	assert.NoError(t, err)
+	assert.NotEmpty(t, shareHistory)
+	
+	latestShare := shareHistory[0]
+	
+	// The URL expiration should be close to the file expiration date
+	timeDiff := latestShare.URLExpiration.Sub(testFile.ExpirationDate)
+	assert.True(t, timeDiff < 1*time.Minute, "URL expiration should be adjusted to match file expiration")
+}
+
+func TestFileManager_GeneratePresignedURL_Integration(t *testing.T) {
+	db, _ := createTempDatabase(t)
+	defer db.Close()
+	
+	mockS3 := newMockS3Service()
+	fm := NewFileManager(db, mockS3)
+	
+	ctx := context.Background()
+	
+	// Create and upload a test file
+	testContent := "This is test content for presigned URL generation"
+	testFile := createTestFile(t, testContent)
+	
+	progressCh := make(chan aws.UploadProgress, 10)
+	fileRecord, err := fm.UploadFile(ctx, testFile, 24*time.Hour, progressCh)
+	assert.NoError(t, err)
+	assert.NotNil(t, fileRecord)
+	close(progressCh)
+	
+	// Generate presigned URL
+	expiration := 1 * time.Hour
+	url, err := fm.GeneratePresignedURL(ctx, fileRecord.ID, expiration)
+	
+	assert.NoError(t, err)
+	assert.NotEmpty(t, url)
+	assert.Contains(t, url, "https://test-bucket.s3.amazonaws.com/")
+	assert.Contains(t, url, fileRecord.S3Key)
+	
+	// Verify share record was created
+	shareHistory, err := db.GetShareHistory(fileRecord.ID)
+	assert.NoError(t, err)
+	assert.Len(t, shareHistory, 1)
+	
+	share := shareHistory[0]
+	assert.Equal(t, fileRecord.ID, share.FileID)
+	assert.Equal(t, url, share.PresignedURL)
+	assert.Empty(t, share.Recipients)
+	assert.Empty(t, share.Message)
+	assert.False(t, share.SharedDate.IsZero())
+	assert.False(t, share.URLExpiration.IsZero())
+	
+	// Generate another presigned URL for the same file
+	url2, err := fm.GeneratePresignedURL(ctx, fileRecord.ID, 2*time.Hour)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, url2)
+	assert.NotEqual(t, url, url2) // URLs should be different due to different expiration
+	
+	// Verify we now have 2 share records
+	shareHistory, err = db.GetShareHistory(fileRecord.ID)
+	assert.NoError(t, err)
+	assert.Len(t, shareHistory, 2)
 }

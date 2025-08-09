@@ -55,6 +55,7 @@ type Database interface {
 	GetFile(id string) (*FileMetadata, error)
 	ListFiles() ([]*FileMetadata, error)
 	UpdateFileStatus(id string, status FileStatus) error
+	UpdateFileExpiration(id string, expirationDate time.Time) error
 	DeleteFile(id string) error
 
 	// Share operations
@@ -265,6 +266,27 @@ func (s *SQLiteDatabase) UpdateFileStatus(id string, status FileStatus) error {
 	result, err := s.db.Exec(query, string(status), id)
 	if err != nil {
 		return fmt.Errorf("failed to update file status: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("file not found: %s", id)
+	}
+
+	return nil
+}
+
+// UpdateFileExpiration updates the expiration date of a file
+func (s *SQLiteDatabase) UpdateFileExpiration(id string, expirationDate time.Time) error {
+	query := `UPDATE files SET expiration_date = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+
+	result, err := s.db.Exec(query, expirationDate, id)
+	if err != nil {
+		return fmt.Errorf("failed to update file expiration: %w", err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
