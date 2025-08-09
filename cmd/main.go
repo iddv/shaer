@@ -1,13 +1,14 @@
 package main
 
 import (
+	"time"
+
 	"file-sharing-app/internal/config"
+	"file-sharing-app/internal/models"
+	"file-sharing-app/internal/ui"
 	"file-sharing-app/pkg/logger"
 
-	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 )
 
 func main() {
@@ -16,61 +17,65 @@ func main() {
 	log.Info("File Sharing App starting...")
 
 	// Load default configuration
-	cfg := config.DefaultConfig()
+	_ = config.DefaultConfig()
 	log.Info("Configuration loaded")
 
 	// Create Fyne application
 	myApp := app.New()
-	// Basic app setup
 
-	myWindow := myApp.NewWindow("File Sharing App")
-	myWindow.Resize(fyne.NewSize(800, 600))
-
-	// Create basic UI layout
-	content := createMainUI(log, cfg)
-	myWindow.SetContent(content)
+	// Create main window
+	mainWindow := ui.NewMainWindow(myApp)
+	
+	// Set up callback functions (placeholders for now - will be connected to business logic in task 11)
+	mainWindow.OnUploadFile = func(filePath string, expiration time.Duration) error {
+		log.Info("Upload file callback called (placeholder)")
+		// This will be implemented in task 11 when integrating with business logic
+		return nil
+	}
+	
+	mainWindow.OnShareFile = func(fileID string, recipients []string, message string) error {
+		log.Info("Share file callback called (placeholder)")
+		// This will be implemented in task 11 when integrating with business logic
+		return nil
+	}
+	
+	mainWindow.OnDeleteFile = func(fileID string) error {
+		log.Info("Delete file callback called (placeholder)")
+		// This will be implemented in task 11 when integrating with business logic
+		return nil
+	}
+	
+	mainWindow.OnRefreshFiles = func() ([]models.FileMetadata, error) {
+		log.Info("Refresh files callback called (placeholder)")
+		// This will be implemented in task 11 when integrating with business logic
+		// For now, return some sample data for UI testing
+		return []models.FileMetadata{
+			{
+				ID:             "sample-1",
+				FileName:       "sample-document.pdf",
+				FileSize:       1024 * 1024, // 1MB
+				UploadDate:     time.Now().Add(-2 * time.Hour),
+				ExpirationDate: time.Now().Add(22 * time.Hour),
+				Status:         models.StatusActive,
+			},
+			{
+				ID:             "sample-2", 
+				FileName:       "uploading-file.jpg",
+				FileSize:       2 * 1024 * 1024, // 2MB
+				UploadDate:     time.Now().Add(-5 * time.Minute),
+				ExpirationDate: time.Now().Add(7 * 24 * time.Hour),
+				Status:         models.StatusUploading,
+			},
+		}, nil
+	}
+	
+	// Initialize with sample data
+	if files, err := mainWindow.OnRefreshFiles(); err == nil {
+		mainWindow.UpdateFiles(files)
+		mainWindow.EnableActions(true)
+		mainWindow.SetStatus("Ready - Sample data loaded")
+	}
 
 	log.Info("Application UI initialized")
-	myWindow.ShowAndRun()
-}
-
-func createMainUI(log *logger.Logger, cfg *config.AppConfig) *fyne.Container {
-	// Header
-	title := widget.NewLabel("File Sharing Application")
-	title.TextStyle.Bold = true
-
-	// Status label
-	status := widget.NewLabel("Ready - Configure AWS credentials to begin")
-
-	// Placeholder buttons for future functionality
-	uploadBtn := widget.NewButton("Upload File", func() {
-		log.Info("Upload button clicked (not implemented yet)")
-	})
-	uploadBtn.Disable()
-
-	settingsBtn := widget.NewButton("Settings", func() {
-		log.Info("Settings button clicked (not implemented yet)")
-	})
-	settingsBtn.Disable()
-
-	// File list placeholder
-	fileList := widget.NewList(
-		func() int { return 0 },
-		func() fyne.CanvasObject {
-			return widget.NewLabel("No files")
-		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {},
-	)
-
-	// Layout
-	buttonContainer := container.NewHBox(uploadBtn, settingsBtn)
-	
-	return container.NewVBox(
-		title,
-		status,
-		buttonContainer,
-		widget.NewSeparator(),
-		widget.NewLabel("Files:"),
-		fileList,
-	)
+	mainWindow.Show()
 }
