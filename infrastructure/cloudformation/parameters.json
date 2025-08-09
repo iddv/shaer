@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "BucketName",
+    "ParameterValue": "file-sharing-app-bucket-12345"
+  },
+  {
+    "ParameterKey": "IAMUserName",
+    "ParameterValue": "file-sharing-app-user-12345"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "production"
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "BucketName",
+    "ParameterValue": "file-sharing-app-dev-164859598862-us-west-2"
+  },
+  {
+    "ParameterKey": "IAMUserName",
+    "ParameterValue": "file-sharing-app-dev-user-164859598862"
+  },
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "development"
+  }
+]

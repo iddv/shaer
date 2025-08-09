@@ -1,0 +1,47 @@
+# AWS Configuration for File Sharing App
+# Copy this file to aws-config.yaml and fill in the values from CloudFormation outputs
+
+aws:
+  region: "eu-central-1"  # Change to your deployment region
+  credentials:
+    access_key_id: "AKIA..."      # From CloudFormation output: AccessKeyId
+    secret_access_key: "..."      # From CloudFormation output: SecretAccessKey
+  
+s3:
+  bucket_name: "file-sharing-app-bucket-123456789012"  # From CloudFormation output: BucketName
+  
+# File expiration settings (maps to S3 lifecycle policies)
+expiration:
+  options:
+    - label: "1 Hour"
+      value: "1hour"
+      description: "File will be deleted after 1 day (minimum S3 period)"
+    - label: "1 Day" 
+      value: "1day"
+      description: "File will be deleted after 1 day"
+    - label: "1 Week"
+      value: "1week" 
+      description: "File will be deleted after 7 days"
+    - label: "1 Month"
+      value: "1month"
+      description: "File will be deleted after 30 days"
+  default: "1week"
+
+# Security settings
+security:
+  max_file_size_mb: 100
+  allowed_file_types:
+    - "pdf"
+    - "doc"
+    - "docx" 
+    - "txt"
+    - "jpg"
+    - "jpeg"
+    - "png"
+    - "gif"
+    - "zip"
+  
+# Logging
+logging:
+  cloudtrail_enabled: true
+  s3_access_logs_enabled: true
