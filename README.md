@@ -71,5 +71,6 @@ The application requires AWS credentials to be configured. Supported methods:
 3. IAM roles (for EC2 instances)
 
 ## License
+This project is licensed under a Non-Commercial License. You may use, modify, and distribute this software for personal, educational, or research purposes. Commercial use requires explicit written permission from the copyright holder.
 
-MIT License
+See the [LICENSE](LICENSE) file for details.

@@ -124,13 +124,60 @@ install: build-local
 	@sudo chmod +x /usr/local/bin/$(APP_NAME)
 	@echo "Installation complete!"
 
+# Run unit tests
+.PHONY: test
+test:
+	@echo "Running unit tests..."
+	@go test -v ./...
+
+# Run unit tests with coverage
+.PHONY: test-coverage
+test-coverage:
+	@echo "Running unit tests with coverage..."
+	@go test -v -coverprofile=coverage.out ./...
+	@go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report generated: coverage.html"
+
+# Run integration tests (requires AWS credentials)
+.PHONY: test-integration
+test-integration:
+	@echo "Running integration tests..."
+	@./test/run_integration_tests.sh
+
+# Run specific test suite
+.PHONY: test-aws
+test-aws:
+	@echo "Running AWS integration tests..."
+	@go test -v -tags=integration ./test/integration/...
+
+.PHONY: test-e2e
+test-e2e:
+	@echo "Running end-to-end tests..."
+	@go test -v -tags=e2e ./test/e2e/...
+
+.PHONY: test-security
+test-security:
+	@echo "Running security tests..."
+	@go test -v -tags=security ./test/security/...
+
+# Deploy AWS infrastructure
+.PHONY: deploy-dev
+deploy-dev:
+	@echo "Deploying development infrastructure..."
+	@cd infrastructure && ./scripts/deploy.sh us-west-2
+
+.PHONY: deploy-prod
+deploy-prod:
+	@echo "Deploying production infrastructure..."
+	@cd infrastructure && ./scripts/deploy.sh us-west-2
+
 # Show help
 .PHONY: help
 help:
 	@echo "File Sharing App - Build System"
 	@echo "================================"
 	@echo ""
-	@echo "Available targets:"
+	@echo "Build targets:"
 	@echo "  all           - Clean and build for all platforms"
 	@echo "  clean         - Clean build artifacts"
 	@echo "  build         - Build for all platforms"
@@ -142,4 +189,17 @@ help:
 	@echo "  package       - Package for distribution"
 	@echo "  test-build    - Test the local build"
 	@echo "  install       - Install locally (Linux/macOS)"
+	@echo ""
+	@echo "Test targets:"
+	@echo "  test          - Run unit tests"
+	@echo "  test-coverage - Run unit tests with coverage"
+	@echo "  test-integration - Run all integration tests"
+	@echo "  test-aws      - Run AWS integration tests"
+	@echo "  test-e2e      - Run end-to-end tests"
+	@echo "  test-security - Run security tests"
+	@echo ""
+	@echo "Deployment targets:"
+	@echo "  deploy-dev    - Deploy development infrastructure"
+	@echo "  deploy-prod   - Deploy production infrastructure"
+	@echo ""
 	@echo "  help          - Show this help message"

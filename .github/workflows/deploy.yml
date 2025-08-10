@@ -1,0 +1,282 @@
+name: Deploy AWS Infrastructure and Run Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/deploy.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      region:
+        description: 'AWS Region'
+        required: true
+        default: 'us-west-2'
+        type: choice
+        options:
+          - us-west-2
+          - us-east-1
+          - eu-central-1
+
+env:
+  GO_VERSION: '1.23.4'
+
+jobs:
+  validate-template:
+    name: Validate CloudFormation Template
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ github.event.inputs.region || 'us-west-2' }}
+
+    - name: Validate CloudFormation template
+      run: |
+        aws cloudformation validate-template \
+          --template-body file://infrastructure/cloudformation/file-sharing-app.yaml
+
+  deploy-infrastructure:
+    name: Deploy AWS Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate-template
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    
+    outputs:
+      bucket-name: ${{ steps.deploy.outputs.bucket-name }}
+      access-key-id: ${{ steps.deploy.outputs.access-key-id }}
+      secret-access-key: ${{ steps.deploy.outputs.secret-access-key }}
+      region: ${{ steps.deploy.outputs.region }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ github.event.inputs.region || 'us-west-2' }}
+
+    - name: Set environment variables
+      run: |
+        if [ "${{ github.event.inputs.environment }}" = "prod" ]; then
+          echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+          echo "STACK_NAME=file-sharing-app-prod" >> $GITHUB_ENV
+        else
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          echo "STACK_NAME=file-sharing-app-dev" >> $GITHUB_ENV
+        fi
+        echo "REGION=${{ github.event.inputs.region || 'us-west-2' }}" >> $GITHUB_ENV
+
+    - name: Generate unique parameters
+      id: params
+      run: |
+        # Generate unique suffix using timestamp and random number
+        SUFFIX=$(date +%s)-$(shuf -i 1000-9999 -n 1)
+        BUCKET_NAME="file-sharing-app-${ENVIRONMENT}-${SUFFIX}-${REGION}"
+        IAM_USER_NAME="file-sharing-app-${ENVIRONMENT}-user-${SUFFIX}"
+        
+        echo "bucket-name=${BUCKET_NAME}" >> $GITHUB_OUTPUT
+        echo "iam-user-name=${IAM_USER_NAME}" >> $GITHUB_OUTPUT
+        
+        # Create parameters file
+        cat > parameters-${ENVIRONMENT}.json << EOF
+        [
+          {
+            "ParameterKey": "BucketName",
+            "ParameterValue": "${BUCKET_NAME}"
+          },
+          {
+            "ParameterKey": "IAMUserName", 
+            "ParameterValue": "${IAM_USER_NAME}"
+          },
+          {
+            "ParameterKey": "Environment",
+            "ParameterValue": "${ENVIRONMENT}"
+          }
+        ]
+        EOF
+
+    - name: Deploy CloudFormation stack
+      id: deploy
+      run: |
+        # Check if stack exists
+        if aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION >/dev/null 2>&1; then
+          echo "Updating existing stack: $STACK_NAME"
+          OPERATION="update-stack"
+        else
+          echo "Creating new stack: $STACK_NAME"
+          OPERATION="create-stack"
+        fi
+        
+        # Deploy the stack
+        aws cloudformation $OPERATION \
+          --stack-name $STACK_NAME \
+          --template-body file://infrastructure/cloudformation/file-sharing-app.yaml \
+          --parameters file://parameters-${ENVIRONMENT}.json \
+          --capabilities CAPABILITY_IAM \
+          --region $REGION \
+          --tags Key=Application,Value=file-sharing-app Key=Environment,Value=${ENVIRONMENT} Key=ManagedBy,Value=GitHub-Actions
+        
+        # Wait for completion
+        if [ "$OPERATION" = "create-stack" ]; then
+          aws cloudformation wait stack-create-complete --stack-name $STACK_NAME --region $REGION
+        else
+          aws cloudformation wait stack-update-complete --stack-name $STACK_NAME --region $REGION
+        fi
+        
+        # Get outputs
+        BUCKET_NAME=$(aws cloudformation describe-stacks \
+          --stack-name $STACK_NAME \
+          --region $REGION \
+          --query 'Stacks[0].Outputs[?OutputKey==`BucketName`].OutputValue' \
+          --output text)
+        
+        ACCESS_KEY_ID=$(aws cloudformation describe-stacks \
+          --stack-name $STACK_NAME \
+          --region $REGION \
+          --query 'Stacks[0].Outputs[?OutputKey==`AccessKeyId`].OutputValue' \
+          --output text)
+        
+        SECRET_ACCESS_KEY=$(aws cloudformation describe-stacks \
+          --stack-name $STACK_NAME \
+          --region $REGION \
+          --query 'Stacks[0].Outputs[?OutputKey==`SecretAccessKey`].OutputValue' \
+          --output text)
+        
+        echo "bucket-name=${BUCKET_NAME}" >> $GITHUB_OUTPUT
+        echo "access-key-id=${ACCESS_KEY_ID}" >> $GITHUB_OUTPUT
+        echo "secret-access-key=${SECRET_ACCESS_KEY}" >> $GITHUB_OUTPUT
+        echo "region=${REGION}" >> $GITHUB_OUTPUT
+
+    - name: Display deployment results
+      run: |
+        echo "## Deployment Results" >> $GITHUB_STEP_SUMMARY
+        echo "- **Stack Name:** $STACK_NAME" >> $GITHUB_STEP_SUMMARY
+        echo "- **Region:** $REGION" >> $GITHUB_STEP_SUMMARY
+        echo "- **Environment:** $ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
+        echo "- **Bucket Name:** ${{ steps.deploy.outputs.bucket-name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **IAM User:** ${{ steps.params.outputs.iam-user-name }}" >> $GITHUB_STEP_SUMMARY
+
+  build-for-integration:
+    name: Build Application for Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy-infrastructure
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-multilib libc6-dev libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev pkg-config
+
+    - name: Build application
+      run: |
+        go build -o file-sharing-app ./cmd/main.go
+
+    - name: Upload binary for integration tests
+      uses: actions/upload-artifact@v4
+      with:
+        name: integration-test-binary
+        path: file-sharing-app
+
+  integration-tests:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, build-for-integration]
+    
+    env:
+      AWS_REGION: ${{ needs.deploy-infrastructure.outputs.region }}
+      S3_BUCKET: ${{ needs.deploy-infrastructure.outputs.bucket-name }}
+      AWS_ACCESS_KEY_ID: ${{ needs.deploy-infrastructure.outputs.access-key-id }}
+      AWS_SECRET_ACCESS_KEY: ${{ needs.deploy-infrastructure.outputs.secret-access-key }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-multilib libc6-dev libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev pkg-config
+
+    - name: Download integration test binary
+      uses: actions/download-artifact@v4
+      with:
+        name: integration-test-binary
+        path: .
+
+    - name: Make binary executable
+      run: chmod +x file-sharing-app
+
+    - name: Run integration tests
+      run: |
+        # Run Go integration tests with real AWS infrastructure
+        go test -v -tags=integration ./test/integration/...
+
+    - name: Run end-to-end workflow tests
+      run: |
+        # Run comprehensive end-to-end tests
+        go test -v -tags=e2e ./test/e2e/...
+
+    - name: Security validation tests
+      run: |
+        # Run security-focused tests
+        go test -v -tags=security ./test/security/...
+
+  cleanup-on-failure:
+    name: Cleanup on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, integration-tests]
+    if: failure() && github.event.inputs.environment == 'dev'
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ needs.deploy-infrastructure.outputs.region }}
+
+    - name: Delete CloudFormation stack
+      run: |
+        STACK_NAME="file-sharing-app-dev"
+        REGION="${{ needs.deploy-infrastructure.outputs.region }}"
+        
+        echo "Cleaning up failed deployment..."
+        aws cloudformation delete-stack --stack-name $STACK_NAME --region $REGION
+        aws cloudformation wait stack-delete-complete --stack-name $STACK_NAME --region $REGION
+        echo "Stack deleted successfully"
