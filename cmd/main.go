@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,10 +19,43 @@ import (
 	"fyne.io/fyne/v2/dialog"
 )
 
+// Version information (set during build)
+var (
+	version = "1.0.0"
+	commit  = "unknown"
+	date    = "unknown"
+)
+
 func main() {
+	// Handle command line flags
+	var showVersion = flag.Bool("version", false, "Show version information")
+	var showHelp = flag.Bool("help", false, "Show help information")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("File Sharing App v%s\n", version)
+		fmt.Printf("Commit: %s\n", commit)
+		fmt.Printf("Built: %s\n", date)
+		return
+	}
+
+	if *showHelp {
+		fmt.Println("File Sharing App - Secure file sharing with AWS S3")
+		fmt.Println("")
+		fmt.Println("Usage:")
+		fmt.Println("  file-sharing-app [options]")
+		fmt.Println("")
+		fmt.Println("Options:")
+		fmt.Println("  -version    Show version information")
+		fmt.Println("  -help       Show this help message")
+		fmt.Println("")
+		fmt.Println("For more information, visit: https://github.com/your-org/file-sharing-app")
+		return
+	}
+
 	// Initialize logging
 	log := logger.New()
-	log.Info("File Sharing App starting...")
+	log.Info(fmt.Sprintf("File Sharing App v%s starting...", version))
 
 	// Load configuration
 	cfg := config.DefaultConfig()

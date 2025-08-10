@@ -1,0 +1,198 @@
+name: Build and Package
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  GO_VERSION: '1.23.4'
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            artifact_name: file-sharing-app-linux-amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            artifact_name: file-sharing-app-linux-arm64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            artifact_name: file-sharing-app-windows-amd64.exe
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            artifact_name: file-sharing-app-darwin-amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            artifact_name: file-sharing-app-darwin-arm64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install dependencies (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-multilib libc6-dev libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev pkg-config
+
+    - name: Install cross-compilation tools (Linux to Windows)
+      if: matrix.os == 'ubuntu-latest' && matrix.goos == 'windows'
+      run: |
+        sudo apt-get install -y gcc-mingw-w64-x86-64
+
+    - name: Get version
+      id: version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/v}
+        else
+          VERSION="dev-$(git rev-parse --short HEAD)"
+        fi
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        echo "DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+
+    - name: Build binary
+      env:
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+        CGO_ENABLED: 1
+        CC: ${{ matrix.goos == 'windows' && 'x86_64-w64-mingw32-gcc' || '' }}
+        VERSION: ${{ steps.version.outputs.VERSION }}
+        COMMIT: ${{ steps.version.outputs.COMMIT }}
+        DATE: ${{ steps.version.outputs.DATE }}
+      run: |
+        mkdir -p dist
+        go build -ldflags="-s -w -X main.version=$VERSION -X main.commit=$COMMIT -X main.date=$DATE" -o dist/${{ matrix.artifact_name }} ./cmd/main.go
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: dist/${{ matrix.artifact_name }}
+
+  package:
+    name: Create packages
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: dist/
+
+    - name: Reorganize artifacts
+      run: |
+        mkdir -p dist/binaries
+        find dist/ -name "file-sharing-app-*" -type f -exec mv {} dist/binaries/ \;
+        ls -la dist/binaries/
+
+    - name: Get version
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Install packaging tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y zip nsis imagemagick
+
+    - name: Create packages
+      env:
+        VERSION: ${{ steps.version.outputs.VERSION }}
+      run: |
+        # Move binaries to expected location
+        mv dist/binaries/* dist/
+        
+        # Make packaging scripts executable
+        chmod +x build/*.sh
+        
+        # Create Linux packages
+        ./build/package-linux.sh
+        
+        # Create Windows ZIP package
+        mkdir -p dist/windows-package
+        cp dist/file-sharing-app-windows-amd64.exe dist/windows-package/
+        cp README.md dist/windows-package/ || true
+        cp LICENSE dist/windows-package/ || true
+        cd dist && zip -r file-sharing-app-${VERSION}-windows.zip windows-package/ && cd ..
+        
+        # Create macOS packages (basic tar.gz since we can't create .app bundles easily in CI)
+        mkdir -p dist/macos-package
+        cp dist/file-sharing-app-darwin-amd64 dist/macos-package/
+        cp dist/file-sharing-app-darwin-arm64 dist/macos-package/
+        cp README.md dist/macos-package/ || true
+        cp LICENSE dist/macos-package/ || true
+        cd dist && tar -czf file-sharing-app-${VERSION}-macos.tar.gz macos-package/ && cd ..
+
+    - name: Generate checksums
+      run: |
+        cd dist
+        find . -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" -o -name "*.AppImage" | xargs sha256sum > packages-checksums.txt
+        cd ..
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/*.zip
+          dist/*.tar.gz
+          dist/*.deb
+          dist/*.AppImage
+          dist/packages-checksums.txt
+        body: |
+          ## File Sharing App v${{ steps.version.outputs.VERSION }}
+          
+          ### Downloads
+          
+          **Windows:**
+          - `file-sharing-app-${{ steps.version.outputs.VERSION }}-windows.zip` - Portable Windows application
+          
+          **macOS:**
+          - `file-sharing-app-${{ steps.version.outputs.VERSION }}-macos.tar.gz` - macOS binaries (Intel and Apple Silicon)
+          
+          **Linux:**
+          - `file-sharing-app-${{ steps.version.outputs.VERSION }}-linux.tar.gz` - Portable Linux application
+          - `file-sharing-app_${{ steps.version.outputs.VERSION }}_amd64.deb` - Debian/Ubuntu package
+          - `File Sharing App-${{ steps.version.outputs.VERSION }}-x86_64.AppImage` - Universal Linux AppImage
+          
+          ### Verification
+          
+          Verify package integrity using the provided checksums:
+          ```bash
+          sha256sum -c packages-checksums.txt
+          ```
+          
+          ### Installation Instructions
+          
+          See the [README](https://github.com/${{ github.repository }}/blob/main/README.md) for detailed installation instructions.
+        draft: false
+        prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
