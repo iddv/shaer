@@ -20,6 +20,9 @@ type ExpirationManager interface {
 	// CleanupExpiredFiles updates the status of expired files to expired
 	CleanupExpiredFiles() error
 	
+	// CleanupExpiredMetadata removes local metadata for files that have been expired for more than 30 days
+	CleanupExpiredMetadata() error
+	
 	// GetExpiredFiles retrieves files that have passed their expiration date but are not marked as expired
 	GetExpiredFiles() ([]*models.FileMetadata, error)
 	
@@ -195,4 +198,59 @@ func (em *ExpirationManagerImpl) GetTimeUntilExpiration(fileID string) (time.Dur
 	}
 	
 	return timeUntilExpiration, nil
+}
+
+// CleanupExpiredMetadata removes local metadata for files that have been expired for more than 30 days
+func (em *ExpirationManagerImpl) CleanupExpiredMetadata() error {
+	// Get all files from database
+	storageFiles, err := em.db.ListFiles()
+	if err != nil {
+		return fmt.Errorf("failed to list files: %w", err)
+	}
+	
+	now := time.Now()
+	const metadataRetentionDays = 30
+	metadataRetentionDuration := time.Duration(metadataRetentionDays) * 24 * time.Hour
+	
+	var filesToDelete []string
+	
+	// Find files that have been expired for more than 30 days
+	for _, storageFile := range storageFiles {
+		if storageFile.Status == storage.StatusExpired {
+			// Check if the file has been expired for more than 30 days
+			timeSinceExpiration := now.Sub(storageFile.ExpirationDate)
+			if timeSinceExpiration > metadataRetentionDuration {
+				filesToDelete = append(filesToDelete, storageFile.ID)
+			}
+		}
+	}
+	
+	if len(filesToDelete) == 0 {
+		em.logger.Info("No expired metadata to cleanup")
+		return nil
+	}
+	
+	// Delete metadata for old expired files
+	var cleanupErrors []string
+	cleanedCount := 0
+	
+	for _, fileID := range filesToDelete {
+		err := em.db.DeleteFile(fileID)
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Sprintf("failed to delete metadata for file %s: %v", fileID, err))
+			em.logger.Error(fmt.Sprintf("Failed to delete metadata for expired file %s: %v", fileID, err))
+		} else {
+			cleanedCount++
+			em.logger.Info(fmt.Sprintf("Deleted metadata for expired file %s", fileID))
+		}
+	}
+	
+	em.logger.Info(fmt.Sprintf("Cleaned up metadata for %d expired files", cleanedCount))
+	
+	// Return error if any cleanup operations failed
+	if len(cleanupErrors) > 0 {
+		return fmt.Errorf("metadata cleanup completed with errors: %v", cleanupErrors)
+	}
+	
+	return nil
 }

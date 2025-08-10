@@ -1408,3 +1408,69 @@ func TestFileManager_GeneratePresignedURL_Integration(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Len(t, shareHistory, 2)
 }
+
+func TestGetExpirationTag(t *testing.T) {
+	tests := []struct {
+		name       string
+		expiration time.Duration
+		expected   string
+	}{
+		{
+			name:       "30 minutes",
+			expiration: 30 * time.Minute,
+			expected:   "1hour",
+		},
+		{
+			name:       "1 hour exactly",
+			expiration: 1 * time.Hour,
+			expected:   "1hour",
+		},
+		{
+			name:       "2 hours",
+			expiration: 2 * time.Hour,
+			expected:   "1day",
+		},
+		{
+			name:       "12 hours",
+			expiration: 12 * time.Hour,
+			expected:   "1day",
+		},
+		{
+			name:       "24 hours exactly",
+			expiration: 24 * time.Hour,
+			expected:   "1day",
+		},
+		{
+			name:       "2 days",
+			expiration: 48 * time.Hour,
+			expected:   "1week",
+		},
+		{
+			name:       "1 week exactly",
+			expiration: 7 * 24 * time.Hour,
+			expected:   "1week",
+		},
+		{
+			name:       "2 weeks",
+			expiration: 14 * 24 * time.Hour,
+			expected:   "1month",
+		},
+		{
+			name:       "1 month exactly",
+			expiration: 30 * 24 * time.Hour,
+			expected:   "1month",
+		},
+		{
+			name:       "2 months",
+			expiration: 60 * 24 * time.Hour,
+			expected:   "1month",
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getExpirationTag(tt.expiration)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

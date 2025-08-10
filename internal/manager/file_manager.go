@@ -298,6 +298,7 @@ func (fm *FileManagerImpl) UploadFile(ctx context.Context, filePath string, expi
 		"file-id":         fileRecord.ID,
 		"original-name":   fileName,
 		"expiration-date": expirationDate.UTC().Format(time.RFC3339),
+		"expiration-tag":  getExpirationTag(expiration),
 	}
 	
 	// Upload file to S3
@@ -342,6 +343,26 @@ func generateS3Key(fileName string) string {
 	s3Key := fmt.Sprintf("uploads/%s/%s%s", timestampPrefix, fileUUID, ext)
 	
 	return s3Key
+}
+
+// getExpirationTag returns the appropriate S3 lifecycle tag based on expiration duration
+func getExpirationTag(expiration time.Duration) string {
+	hours := expiration.Hours()
+	
+	// Map expiration duration to lifecycle policy tags
+	switch {
+	case hours <= 1:
+		return "1hour"
+	case hours <= 24:
+		return "1day"
+	case hours <= 24*7:
+		return "1week"
+	case hours <= 24*30:
+		return "1month"
+	default:
+		// For longer durations, default to 1 month
+		return "1month"
+	}
 }
 
 // GeneratePresignedURL generates a presigned URL for file sharing

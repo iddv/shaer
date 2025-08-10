@@ -172,6 +172,25 @@ func (s *S3ServiceImpl) UploadFile(ctx context.Context, key string, filePath str
 		metadata["upload-timestamp"] = time.Now().UTC().Format(time.RFC3339)
 		metadata["original-filename"] = filepath.Base(filePath)
 
+		// Prepare tags for S3 lifecycle policies
+		var tags []types.Tag
+		
+		// Add expiration tag if provided in metadata
+		if expirationTag, exists := metadata["expiration-tag"]; exists {
+			tags = append(tags, types.Tag{
+				Key:   aws.String("expiration"),
+				Value: aws.String(expirationTag),
+			})
+			// Remove from metadata since it's now a tag
+			delete(metadata, "expiration-tag")
+		}
+		
+		// Add upload date tag for additional lifecycle management
+		tags = append(tags, types.Tag{
+			Key:   aws.String("upload-date"),
+			Value: aws.String(time.Now().UTC().Format("2006-01-02")),
+		})
+
 		// Create upload input
 		input := &s3.PutObjectInput{
 			Bucket:      aws.String(s.bucket),
@@ -179,6 +198,7 @@ func (s *S3ServiceImpl) UploadFile(ctx context.Context, key string, filePath str
 			Body:        reader,
 			ContentType: aws.String(contentType),
 			Metadata:    metadata,
+			Tagging:     aws.String(formatTagsForUpload(tags)),
 			// Enable server-side encryption
 			ServerSideEncryption: types.ServerSideEncryptionAes256,
 		}
@@ -468,6 +488,22 @@ func getContentType(filePath string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// formatTagsForUpload formats tags for S3 upload (key1=value1&key2=value2)
+func formatTagsForUpload(tags []types.Tag) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	
+	var tagPairs []string
+	for _, tag := range tags {
+		if tag.Key != nil && tag.Value != nil {
+			tagPairs = append(tagPairs, fmt.Sprintf("%s=%s", *tag.Key, *tag.Value))
+		}
+	}
+	
+	return strings.Join(tagPairs, "&")
 }
 
 // progressReader wraps an io.Reader to provide upload progress updates

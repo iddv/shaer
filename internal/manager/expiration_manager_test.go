@@ -47,6 +47,85 @@ func TestNewExpirationManager(t *testing.T) {
 	assert.IsType(t, &ExpirationManagerImpl{}, em)
 }
 
+func TestExpirationManager_CleanupExpiredMetadata(t *testing.T) {
+	db, _ := createTempDatabaseForExpiration(t)
+	defer db.Close()
+	
+	em := NewExpirationManager(db)
+	
+	now := time.Now()
+	
+	// Create test files with different expiration scenarios
+	testFiles := []*storage.FileMetadata{
+		// File expired 35 days ago (should be deleted)
+		createTestFileMetadata("file1", "old_expired.txt", now.Add(-35*24*time.Hour), storage.StatusExpired),
+		// File expired 20 days ago (should not be deleted yet)
+		createTestFileMetadata("file2", "recent_expired.txt", now.Add(-20*24*time.Hour), storage.StatusExpired),
+		// File expired 40 days ago (should be deleted)
+		createTestFileMetadata("file3", "very_old_expired.txt", now.Add(-40*24*time.Hour), storage.StatusExpired),
+		// Active file (should not be deleted)
+		createTestFileMetadata("file4", "active.txt", now.Add(24*time.Hour), storage.StatusActive),
+	}
+	
+	// Save test files to database
+	for _, file := range testFiles {
+		err := db.SaveFile(file)
+		require.NoError(t, err)
+	}
+	
+	// Run cleanup
+	err := em.CleanupExpiredMetadata()
+	assert.NoError(t, err)
+	
+	// Verify that old expired files were deleted
+	_, err = db.GetFile("file1")
+	assert.Error(t, err) // Should not exist
+	
+	_, err = db.GetFile("file3")
+	assert.Error(t, err) // Should not exist
+	
+	// Verify that recent expired and active files still exist
+	_, err = db.GetFile("file2")
+	assert.NoError(t, err) // Should still exist
+	
+	_, err = db.GetFile("file4")
+	assert.NoError(t, err) // Should still exist
+}
+
+func TestExpirationManager_CleanupExpiredMetadata_NoFilesToCleanup(t *testing.T) {
+	db, _ := createTempDatabaseForExpiration(t)
+	defer db.Close()
+	
+	em := NewExpirationManager(db)
+	
+	now := time.Now()
+	
+	// Create test files that should not be cleaned up
+	testFiles := []*storage.FileMetadata{
+		// Recently expired file
+		createTestFileMetadata("file1", "recent_expired.txt", now.Add(-10*24*time.Hour), storage.StatusExpired),
+		// Active file
+		createTestFileMetadata("file2", "active.txt", now.Add(24*time.Hour), storage.StatusActive),
+	}
+	
+	// Save test files to database
+	for _, file := range testFiles {
+		err := db.SaveFile(file)
+		require.NoError(t, err)
+	}
+	
+	// Run cleanup
+	err := em.CleanupExpiredMetadata()
+	assert.NoError(t, err)
+	
+	// Verify that all files still exist
+	_, err = db.GetFile("file1")
+	assert.NoError(t, err)
+	
+	_, err = db.GetFile("file2")
+	assert.NoError(t, err)
+}
+
 func TestExpirationManager_SetExpiration(t *testing.T) {
 	db, _ := createTempDatabaseForExpiration(t)
 	defer db.Close()

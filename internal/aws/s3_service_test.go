@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -625,5 +626,73 @@ func BenchmarkProgressReader(b *testing.B) {
 		// Drain the channel
 		for range progressCh {
 		}
+	}
+}
+
+func TestFormatTagsForUpload(t *testing.T) {
+	tests := []struct {
+		name     string
+		tags     []types.Tag
+		expected string
+	}{
+		{
+			name:     "empty tags",
+			tags:     []types.Tag{},
+			expected: "",
+		},
+		{
+			name: "single tag",
+			tags: []types.Tag{
+				{Key: aws.String("expiration"), Value: aws.String("1hour")},
+			},
+			expected: "expiration=1hour",
+		},
+		{
+			name: "multiple tags",
+			tags: []types.Tag{
+				{Key: aws.String("expiration"), Value: aws.String("1day")},
+				{Key: aws.String("upload-date"), Value: aws.String("2024-01-01")},
+			},
+			expected: "expiration=1day&upload-date=2024-01-01",
+		},
+		{
+			name: "tags with special characters",
+			tags: []types.Tag{
+				{Key: aws.String("file-type"), Value: aws.String("test-file")},
+				{Key: aws.String("user_id"), Value: aws.String("user123")},
+			},
+			expected: "file-type=test-file&user_id=user123",
+		},
+		{
+			name: "tag with nil key",
+			tags: []types.Tag{
+				{Key: nil, Value: aws.String("value")},
+				{Key: aws.String("valid"), Value: aws.String("tag")},
+			},
+			expected: "valid=tag",
+		},
+		{
+			name: "tag with nil value",
+			tags: []types.Tag{
+				{Key: aws.String("key"), Value: nil},
+				{Key: aws.String("valid"), Value: aws.String("tag")},
+			},
+			expected: "valid=tag",
+		},
+		{
+			name: "tag with both nil key and value",
+			tags: []types.Tag{
+				{Key: nil, Value: nil},
+				{Key: aws.String("valid"), Value: aws.String("tag")},
+			},
+			expected: "valid=tag",
+		},
+	}
+	
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatTagsForUpload(tt.tags)
+			assert.Equal(t, tt.expected, result)
+		})
 	}
 }
