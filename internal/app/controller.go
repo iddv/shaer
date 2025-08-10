@@ -9,6 +9,7 @@ import (
 	"file-sharing-app/internal/manager"
 	"file-sharing-app/internal/models"
 	"file-sharing-app/internal/storage"
+	"file-sharing-app/pkg/errors"
 	"file-sharing-app/pkg/logger"
 )
 
@@ -562,4 +563,164 @@ func containsSubstringIgnoreCase(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// Error Recovery Mechanisms
+
+// handleError provides centralized error handling with user-friendly messages and recovery suggestions
+func (c *Controller) handleError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// Classify the error using our error system
+	appErr := errors.ClassifyError(err)
+	
+	c.logger.ErrorWithFields("Operation failed", map[string]interface{}{
+		"operation":        operation,
+		"error_code":       string(appErr.Code),
+		"user_message":     appErr.GetUserMessage(),
+		"suggested_action": appErr.GetSuggestedAction(),
+		"recoverable":      appErr.IsRecoverable(),
+	})
+
+	// Update UI with user-friendly status message
+	c.mainWindow.SetStatus(fmt.Sprintf("Error: %s", appErr.GetUserMessage()))
+
+	// For recoverable errors, suggest retry or recovery actions
+	if appErr.IsRecoverable() {
+		c.logger.InfoWithFields("Error is recoverable", map[string]interface{}{
+			"operation":        operation,
+			"suggested_action": appErr.GetSuggestedAction(),
+		})
+		
+		// For network errors, check if we should switch to offline mode
+		if appErr.Code == errors.ErrNetworkError || appErr.Code == errors.ErrConnectionTimeout {
+			c.handleNetworkError(operation)
+		}
+	}
+
+	return appErr
+}
+
+// handleNetworkError handles network-related errors with automatic offline mode switching
+func (c *Controller) handleNetworkError(operation string) {
+	c.logger.WarnWithFields("Network error detected, checking offline mode", map[string]interface{}{
+		"operation": operation,
+	})
+
+	// Check if we should switch to offline mode
+	if !c.syncManager.IsOfflineMode() {
+		c.logger.Info("Switching to offline mode due to network issues")
+		c.mainWindow.SetStatus("Network unavailable - switched to offline mode")
+		
+		// Refresh the file list to show only locally available files
+		go func() {
+			if err := c.refreshFiles(); err != nil {
+				c.logger.ErrorWithError("Failed to refresh files in offline mode", err)
+			}
+		}()
+	}
+}
+
+// retryOperation attempts to retry a recoverable operation with exponential backoff
+func (c *Controller) retryOperation(operation string, fn func() error) error {
+	config := errors.DefaultRetryConfig()
+	config.BaseDelay = 2 * time.Second  // Slightly longer delay for UI operations
+	config.MaxDelay = 30 * time.Second
+	
+	return c.logger.LogOperation(fmt.Sprintf("retry_%s", operation), func() error {
+		return errors.RetryWithBackoff(c.ctx, fn, config)
+	})
+}
+
+// recoverFromError attempts to recover from specific error conditions
+func (c *Controller) recoverFromError(err error) bool {
+	appErr := errors.ClassifyError(err)
+	
+	switch appErr.Code {
+	case errors.ErrInvalidCredentials, errors.ErrCredentialsExpired:
+		c.logger.Info("Attempting to recover from credential error")
+		c.mainWindow.SetStatus("AWS credentials need to be updated - please check settings")
+		return true
+		
+	case errors.ErrS3BucketNotFound:
+		c.logger.Info("Attempting to recover from bucket not found error")
+		c.mainWindow.SetStatus("S3 bucket not found - please check settings")
+		return true
+		
+	case errors.ErrNetworkError, errors.ErrConnectionTimeout:
+		c.logger.Info("Attempting to recover from network error")
+		c.handleNetworkError("recovery")
+		return true
+		
+	case errors.ErrDatabaseError, errors.ErrDatabaseConnection:
+		c.logger.Info("Database error detected - application may need restart")
+		c.mainWindow.SetStatus("Database error - please restart the application")
+		return false // Cannot recover from database errors
+		
+	default:
+		return false
+	}
+}
+
+// validateOperation performs pre-operation validation to prevent common errors
+func (c *Controller) validateOperation(operation string) error {
+	switch operation {
+	case "upload", "share", "delete":
+		// Check if we're in offline mode for operations that require network
+		if c.syncManager.IsOfflineMode() {
+			return errors.NewAppError(
+				errors.ErrServiceUnavailable,
+				"Operation not available in offline mode",
+				nil,
+			)
+		}
+		
+		// Check if we have valid settings
+		settings, err := c.settingsManager.LoadSettings()
+		if err != nil {
+			return errors.WrapError(err, errors.ErrConfigurationError, "failed to load application settings")
+		}
+		
+		if err := settings.ValidateForSave(); err != nil {
+			return errors.WrapError(err, errors.ErrInvalidConfig, "application settings are invalid")
+		}
+		
+	case "refresh", "list":
+		// These operations can work in offline mode, no additional validation needed
+		break
+		
+	default:
+		c.logger.WarnWithFields("Unknown operation validation requested", map[string]interface{}{
+			"operation": operation,
+		})
+	}
+	
+	return nil
+}
+
+// handleOperationWithRecovery wraps operations with error handling and recovery
+func (c *Controller) handleOperationWithRecovery(operation string, fn func() error) error {
+	// Pre-operation validation
+	if err := c.validateOperation(operation); err != nil {
+		return c.handleError(operation, err)
+	}
+	
+	// Execute the operation with retry logic for recoverable errors
+	err := c.retryOperation(operation, fn)
+	
+	if err != nil {
+		// Attempt recovery
+		if c.recoverFromError(err) {
+			c.logger.InfoWithFields("Error recovery attempted", map[string]interface{}{
+				"operation": operation,
+			})
+		}
+		
+		// Handle and log the error
+		return c.handleError(operation, err)
+	}
+	
+	return nil
 }

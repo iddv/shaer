@@ -504,19 +504,19 @@ func TestS3ServiceImpl_handleS3Error(t *testing.T) {
 			name:      "context deadline exceeded",
 			operation: "upload",
 			inputErr:  context.DeadlineExceeded,
-			expectMsg: "operation timed out while trying to upload",
+			expectMsg: "CONNECTION_TIMEOUT: Operation timed out",
 		},
 		{
 			name:      "context canceled",
 			operation: "download",
 			inputErr:  context.Canceled,
-			expectMsg: "operation was canceled while trying to download",
+			expectMsg: "UPLOAD_CANCELED: Operation was canceled",
 		},
 		{
 			name:      "generic error",
 			operation: "delete",
 			inputErr:  fmt.Errorf("some generic error"),
-			expectMsg: "failed to delete: some generic error",
+			expectMsg: "AWS_SERVICE_ERROR: AWS S3 operation failed: delete",
 		},
 	}
 

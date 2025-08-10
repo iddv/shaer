@@ -9,6 +9,9 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	
+	"file-sharing-app/pkg/errors"
+	"file-sharing-app/pkg/logger"
 )
 
 // FileStatus represents the status of a file
@@ -72,47 +75,67 @@ type Database interface {
 
 // SQLiteDatabase implements the Database interface using SQLite
 type SQLiteDatabase struct {
-	db *sql.DB
+	db     *sql.DB
+	logger *logger.Logger
 }
 
 // NewSQLiteDatabase creates a new SQLite database instance
 func NewSQLiteDatabase(dbPath string) (*SQLiteDatabase, error) {
-	// Ensure the directory exists
-	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create database directory: %w", err)
-	}
+	log := logger.NewWithComponent("database")
+	var sqliteDB *SQLiteDatabase
+	
+	err := log.LogOperation("initialize_database", func() error {
+		log.InfoWithFields("Initializing SQLite database", map[string]interface{}{
+			"db_path": filepath.Base(dbPath), // Only log filename for security
+		})
 
-	// Open database connection
-	db, err := sql.Open("sqlite3", dbPath)
+		// Ensure the directory exists
+		dir := filepath.Dir(dbPath)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return errors.WrapError(err, errors.ErrDatabaseConnection, "failed to create database directory")
+		}
+
+		// Open database connection
+		db, err := sql.Open("sqlite3", dbPath)
+		if err != nil {
+			return errors.WrapError(err, errors.ErrDatabaseConnection, "failed to open database")
+		}
+
+		// Ping to ensure the database file is created
+		if err := db.Ping(); err != nil {
+			db.Close()
+			return errors.WrapError(err, errors.ErrDatabaseConnection, "failed to ping database")
+		}
+
+		// Set proper file permissions (600 - read/write for owner only)
+		if err := os.Chmod(dbPath, 0600); err != nil {
+			db.Close()
+			return errors.WrapError(err, errors.ErrDatabaseConnection, "failed to set database file permissions")
+		}
+
+		// Enable foreign keys
+		if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+			db.Close()
+			return errors.WrapError(err, errors.ErrDatabaseError, "failed to enable foreign keys")
+		}
+
+		sqliteDB = &SQLiteDatabase{
+			db:     db,
+			logger: log,
+		}
+
+		// Initialize schema
+		if err := sqliteDB.initSchema(); err != nil {
+			db.Close()
+			return errors.WrapError(err, errors.ErrDatabaseError, "failed to initialize schema")
+		}
+
+		log.Info("Database initialized successfully")
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	// Ping to ensure the database file is created
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
-	// Set proper file permissions (600 - read/write for owner only)
-	if err := os.Chmod(dbPath, 0600); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set database file permissions: %w", err)
-	}
-
-	// Enable foreign keys
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
-	}
-
-	sqliteDB := &SQLiteDatabase{db: db}
-
-	// Initialize schema
-	if err := sqliteDB.initSchema(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+		return nil, err
 	}
 
 	return sqliteDB, nil
@@ -168,55 +191,83 @@ func (s *SQLiteDatabase) initSchema() error {
 
 // SaveFile saves a file metadata record to the database
 func (s *SQLiteDatabase) SaveFile(file *FileMetadata) error {
-	now := time.Now()
-	file.CreatedAt = now
-	file.UpdatedAt = now
+	return s.logger.LogOperation("save_file", func() error {
+		s.logger.InfoWithFields("Saving file metadata", map[string]interface{}{
+			"file_id":   file.ID,
+			"filename":  file.FileName,
+			"file_size": file.FileSize,
+			"status":    string(file.Status),
+		})
 
-	query := `
-		INSERT INTO files (id, filename, filepath, filesize, upload_date, expiration_date, s3_key, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
+		now := time.Now()
+		file.CreatedAt = now
+		file.UpdatedAt = now
 
-	_, err := s.db.Exec(query,
-		file.ID, file.FileName, file.FilePath, file.FileSize,
-		file.UploadDate, file.ExpirationDate, file.S3Key, string(file.Status),
-		file.CreatedAt, file.UpdatedAt,
-	)
+		query := `
+			INSERT INTO files (id, filename, filepath, filesize, upload_date, expiration_date, s3_key, status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`
 
-	if err != nil {
-		return fmt.Errorf("failed to save file: %w", err)
-	}
+		_, err := s.db.Exec(query,
+			file.ID, file.FileName, file.FilePath, file.FileSize,
+			file.UploadDate, file.ExpirationDate, file.S3Key, string(file.Status),
+			file.CreatedAt, file.UpdatedAt,
+		)
 
-	return nil
+		if err != nil {
+			s.logger.ErrorWithFields("Failed to save file metadata", map[string]interface{}{
+				"file_id": file.ID,
+			})
+			return errors.WrapError(err, errors.ErrDatabaseError, "failed to save file metadata")
+		}
+
+		return nil
+	})
 }
 
 // GetFile retrieves a file metadata record by ID
 func (s *SQLiteDatabase) GetFile(id string) (*FileMetadata, error) {
-	query := `
-		SELECT id, filename, filepath, filesize, upload_date, expiration_date, s3_key, status, created_at, updated_at
-		FROM files WHERE id = ?
-	`
+	var file *FileMetadata
+	err := s.logger.LogOperation("get_file", func() error {
+		s.logger.DebugWithFields("Retrieving file metadata", map[string]interface{}{
+			"file_id": id,
+		})
 
-	row := s.db.QueryRow(query, id)
+		query := `
+			SELECT id, filename, filepath, filesize, upload_date, expiration_date, s3_key, status, created_at, updated_at
+			FROM files WHERE id = ?
+		`
 
-	var file FileMetadata
-	var status string
+		row := s.db.QueryRow(query, id)
 
-	err := row.Scan(
-		&file.ID, &file.FileName, &file.FilePath, &file.FileSize,
-		&file.UploadDate, &file.ExpirationDate, &file.S3Key, &status,
-		&file.CreatedAt, &file.UpdatedAt,
-	)
+		var fileData FileMetadata
+		var status string
 
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("file not found: %s", id)
+		err := row.Scan(
+			&fileData.ID, &fileData.FileName, &fileData.FilePath, &fileData.FileSize,
+			&fileData.UploadDate, &fileData.ExpirationDate, &fileData.S3Key, &status,
+			&fileData.CreatedAt, &fileData.UpdatedAt,
+		)
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				s.logger.WarnWithFields("File not found", map[string]interface{}{
+					"file_id": id,
+				})
+				return errors.NewAppError(errors.ErrRecordNotFound, "file not found", err)
+			}
+			s.logger.ErrorWithFields("Failed to retrieve file metadata", map[string]interface{}{
+				"file_id": id,
+			})
+			return errors.WrapError(err, errors.ErrDatabaseError, "failed to get file")
 		}
-		return nil, fmt.Errorf("failed to get file: %w", err)
-	}
 
-	file.Status = FileStatus(status)
-	return &file, nil
+		fileData.Status = FileStatus(status)
+		file = &fileData
+		return nil
+	})
+
+	return file, err
 }
 
 // ListFiles retrieves all file metadata records
