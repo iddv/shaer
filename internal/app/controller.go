@@ -35,6 +35,7 @@ type Controller struct {
 	shareManager      manager.ShareManager
 	expirationManager manager.ExpirationManager
 	settingsManager   manager.SettingsManager
+	syncManager       manager.SyncManager
 	
 	// UI components
 	mainWindow MainWindowInterface
@@ -53,6 +54,7 @@ func NewController(
 	shareManager manager.ShareManager,
 	expirationManager manager.ExpirationManager,
 	settingsManager manager.SettingsManager,
+	syncManager manager.SyncManager,
 	mainWindow MainWindowInterface,
 ) *Controller {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -62,6 +64,7 @@ func NewController(
 		shareManager:      shareManager,
 		expirationManager: expirationManager,
 		settingsManager:   settingsManager,
+		syncManager:       syncManager,
 		mainWindow:        mainWindow,
 		logger:            logger.New(),
 		ctx:               ctx,
@@ -78,17 +81,26 @@ func NewController(
 func (c *Controller) Start() error {
 	c.logger.Info("Starting application controller")
 	
+	// Perform initial synchronization with S3
+	c.mainWindow.SetStatus("Synchronizing with S3...")
+	go c.performInitialSync()
+	
 	// Start background expiration checker
 	go c.startExpirationChecker()
 	
-	// Load initial file list
+	// Load initial file list (this will work even if sync fails)
 	if err := c.refreshFiles(); err != nil {
 		c.logger.Error(fmt.Sprintf("Failed to load initial files: %v", err))
 		c.mainWindow.SetStatus("Error loading files: " + err.Error())
 		return err
 	}
 	
-	c.mainWindow.SetStatus("Ready")
+	// Set initial status based on offline mode
+	if c.syncManager.IsOfflineMode() {
+		c.mainWindow.SetStatus("Ready (Offline Mode)")
+	} else {
+		c.mainWindow.SetStatus("Ready")
+	}
 	c.mainWindow.EnableActions(true)
 	
 	return nil
@@ -115,6 +127,13 @@ func (c *Controller) setupUICallbacks() {
 func (c *Controller) handleUploadFile(filePath string, expiration time.Duration) error {
 	c.logger.Info(fmt.Sprintf("Starting file upload: %s", filePath))
 	
+	// Check if we're in offline mode
+	if c.syncManager.IsOfflineMode() {
+		c.logger.Error("Cannot upload files in offline mode")
+		c.mainWindow.SetStatus("Upload failed: Application is in offline mode")
+		return fmt.Errorf("cannot upload files in offline mode")
+	}
+	
 	// Update UI to show upload in progress
 	c.mainWindow.SetStatus("Uploading file...")
 	c.mainWindow.EnableActions(false)
@@ -134,7 +153,15 @@ func (c *Controller) handleUploadFile(filePath string, expiration time.Duration)
 		fileMetadata, err := c.fileManager.UploadFile(c.ctx, filePath, expiration, progressCh)
 		if err != nil {
 			c.logger.Error(fmt.Sprintf("File upload failed: %v", err))
-			c.mainWindow.SetStatus("Upload failed: " + err.Error())
+			
+			// Check if error is due to network issues and enter offline mode
+			if isNetworkError(err) {
+				c.logger.Info("Network error detected, entering offline mode")
+				c.syncManager.SetOfflineMode(true)
+				c.mainWindow.SetStatus("Upload failed: Network error - Entered offline mode")
+			} else {
+				c.mainWindow.SetStatus("Upload failed: " + err.Error())
+			}
 			return
 		}
 		
@@ -163,6 +190,13 @@ func (c *Controller) handleUploadFile(filePath string, expiration time.Duration)
 func (c *Controller) handleShareFile(fileID string, recipients []string, message string) error {
 	c.logger.Info(fmt.Sprintf("Starting file share: %s with %d recipients", fileID, len(recipients)))
 	
+	// Check if we're in offline mode
+	if c.syncManager.IsOfflineMode() {
+		c.logger.Error("Cannot share files in offline mode")
+		c.mainWindow.SetStatus("Sharing failed: Application is in offline mode")
+		return fmt.Errorf("cannot share files in offline mode")
+	}
+	
 	// Update UI to show sharing in progress
 	c.mainWindow.SetStatus("Sharing file...")
 	
@@ -171,7 +205,15 @@ func (c *Controller) handleShareFile(fileID string, recipients []string, message
 		shareRecord, err := c.shareManager.ShareFile(c.ctx, fileID, recipients, message)
 		if err != nil {
 			c.logger.Error(fmt.Sprintf("File sharing failed: %v", err))
-			c.mainWindow.SetStatus("Sharing failed: " + err.Error())
+			
+			// Check if error is due to network issues and enter offline mode
+			if isNetworkError(err) {
+				c.logger.Info("Network error detected, entering offline mode")
+				c.syncManager.SetOfflineMode(true)
+				c.mainWindow.SetStatus("Sharing failed: Network error - Entered offline mode")
+			} else {
+				c.mainWindow.SetStatus("Sharing failed: " + err.Error())
+			}
 			return
 		}
 		
@@ -301,9 +343,23 @@ func (c *Controller) checkAndCleanupExpiredFiles() {
 func (c *Controller) GeneratePresignedURL(fileID string, expiration time.Duration) (string, error) {
 	c.logger.Info(fmt.Sprintf("Generating presigned URL for file: %s", fileID))
 	
+	// Check if we're in offline mode
+	if c.syncManager.IsOfflineMode() {
+		c.logger.Error("Cannot generate presigned URLs in offline mode")
+		return "", fmt.Errorf("cannot generate presigned URLs in offline mode")
+	}
+	
 	url, err := c.fileManager.GeneratePresignedURL(c.ctx, fileID, expiration)
 	if err != nil {
 		c.logger.Error(fmt.Sprintf("Failed to generate presigned URL: %v", err))
+		
+		// Check if error is due to network issues and enter offline mode
+		if isNetworkError(err) {
+			c.logger.Info("Network error detected, entering offline mode")
+			c.syncManager.SetOfflineMode(true)
+			return "", fmt.Errorf("network error - entered offline mode: %w", err)
+		}
+		
 		return "", err
 	}
 	
@@ -342,4 +398,168 @@ func (c *Controller) handleLoadSettings() (*models.ApplicationSettings, error) {
 	
 	c.logger.Info("Application settings loaded successfully")
 	return settings, nil
+}
+
+// performInitialSync performs initial synchronization with S3 on startup
+func (c *Controller) performInitialSync() {
+	c.logger.Info("Starting initial synchronization with S3")
+	
+	// Use a timeout for the initial sync
+	syncCtx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	defer cancel()
+	
+	result, err := c.syncManager.SyncWithS3(syncCtx)
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("Initial sync failed: %v", err))
+		if result != nil && result.OfflineMode {
+			c.mainWindow.SetStatus("Ready (Offline Mode - S3 unavailable)")
+		} else {
+			c.mainWindow.SetStatus("Ready (Sync failed)")
+		}
+		return
+	}
+	
+	// Log sync results
+	c.logger.Info(fmt.Sprintf("Initial sync completed: %d total, %d verified, %d missing, %d errors in %v", 
+		result.TotalFiles, result.VerifiedFiles, result.MissingFiles, result.ErrorFiles, result.SyncDuration))
+	
+	// Update UI status based on sync results
+	if result.OfflineMode {
+		c.mainWindow.SetStatus("Ready (Offline Mode)")
+	} else if result.ErrorFiles > 0 || result.MissingFiles > 0 {
+		c.mainWindow.SetStatus(fmt.Sprintf("Ready (Sync completed with %d issues)", result.ErrorFiles+result.MissingFiles))
+	} else {
+		c.mainWindow.SetStatus("Ready (Synced)")
+	}
+	
+	// Refresh file list to show any status updates
+	if err := c.refreshFiles(); err != nil {
+		c.logger.Error(fmt.Sprintf("Failed to refresh files after sync: %v", err))
+	}
+}
+
+// SyncWithS3 manually triggers synchronization with S3 (can be called from UI)
+func (c *Controller) SyncWithS3() (*manager.SyncResult, error) {
+	c.logger.Info("Manual sync with S3 requested")
+	
+	c.mainWindow.SetStatus("Synchronizing with S3...")
+	c.mainWindow.EnableActions(false)
+	
+	defer func() {
+		c.mainWindow.EnableActions(true)
+	}()
+	
+	// Use a timeout for manual sync
+	syncCtx, cancel := context.WithTimeout(c.ctx, 60*time.Second)
+	defer cancel()
+	
+	result, err := c.syncManager.SyncWithS3(syncCtx)
+	if err != nil {
+		c.logger.Error(fmt.Sprintf("Manual sync failed: %v", err))
+		if result != nil && result.OfflineMode {
+			c.mainWindow.SetStatus("Ready (Offline Mode - S3 unavailable)")
+		} else {
+			c.mainWindow.SetStatus("Sync failed: " + err.Error())
+		}
+		return result, err
+	}
+	
+	// Log sync results
+	c.logger.Info(fmt.Sprintf("Manual sync completed: %d total, %d verified, %d missing, %d errors in %v", 
+		result.TotalFiles, result.VerifiedFiles, result.MissingFiles, result.ErrorFiles, result.SyncDuration))
+	
+	// Update UI status based on sync results
+	if result.OfflineMode {
+		c.mainWindow.SetStatus("Ready (Offline Mode)")
+	} else if result.ErrorFiles > 0 || result.MissingFiles > 0 {
+		c.mainWindow.SetStatus(fmt.Sprintf("Sync completed with %d issues", result.ErrorFiles+result.MissingFiles))
+	} else {
+		c.mainWindow.SetStatus("Sync completed successfully")
+	}
+	
+	// Refresh file list to show any status updates
+	if err := c.refreshFiles(); err != nil {
+		c.logger.Error(fmt.Sprintf("Failed to refresh files after manual sync: %v", err))
+	}
+	
+	return result, nil
+}
+
+// IsOfflineMode returns true if the application is in offline mode
+func (c *Controller) IsOfflineMode() bool {
+	return c.syncManager.IsOfflineMode()
+}
+
+// GetLastSyncTime returns the timestamp of the last successful sync
+func (c *Controller) GetLastSyncTime() (time.Time, error) {
+	return c.syncManager.GetLastSyncTime()
+}
+
+// VerifyFileExists checks if a specific file exists in S3
+func (c *Controller) VerifyFileExists(fileID string) (*manager.FileVerificationResult, error) {
+	return c.syncManager.VerifyFileExists(c.ctx, fileID)
+}
+
+// isNetworkError checks if an error is related to network connectivity
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	
+	errStr := err.Error()
+	networkKeywords := []string{
+		"timeout",
+		"connection",
+		"network",
+		"dial",
+		"no such host",
+		"connection refused",
+		"connection reset",
+		"context deadline exceeded",
+	}
+	
+	for _, keyword := range networkKeywords {
+		if containsIgnoreCase(errStr, keyword) {
+			return true
+		}
+	}
+	
+	return false
+}
+
+// containsIgnoreCase checks if a string contains a substring (case-insensitive)
+func containsIgnoreCase(s, substr string) bool {
+	// Simple case-insensitive substring search
+	sLower := toLower(s)
+	substrLower := toLower(substr)
+	
+	return len(sLower) >= len(substrLower) && 
+		   (sLower == substrLower || 
+		    (len(sLower) > len(substrLower) && 
+		     (sLower[:len(substrLower)] == substrLower || 
+		      sLower[len(sLower)-len(substrLower):] == substrLower || 
+		      containsSubstringIgnoreCase(sLower, substrLower))))
+}
+
+// toLower converts a string to lowercase
+func toLower(s string) string {
+	result := make([]byte, len(s))
+	for i, b := range []byte(s) {
+		if b >= 'A' && b <= 'Z' {
+			result[i] = b + 32
+		} else {
+			result[i] = b
+		}
+	}
+	return string(result)
+}
+
+// containsSubstringIgnoreCase performs a simple substring search
+func containsSubstringIgnoreCase(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

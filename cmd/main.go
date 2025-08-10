@@ -85,9 +85,18 @@ func initializeApplication(cfg *config.AppConfig, mainWindow *ui.MainWindow, log
 	shareManager := manager.NewShareManager(database, s3Service)
 	expirationManager := manager.NewExpirationManager(database)
 	settingsManager := manager.NewSettingsManager(database)
+	
+	// Initialize sync manager (handles offline capability)
+	var syncManager manager.SyncManager
+	if s3Service != nil {
+		syncManager = manager.NewSyncManager(database, s3Service)
+	} else {
+		// Create sync manager in offline mode if S3 service is not available
+		syncManager = manager.NewSyncManagerWithoutS3(database)
+	}
 
 	// Create application controller
-	controller := app.NewController(fileManager, shareManager, expirationManager, settingsManager, mainWindow)
+	controller := app.NewController(fileManager, shareManager, expirationManager, settingsManager, syncManager, mainWindow)
 
 	// Update UI status based on AWS credentials configuration
 	if !credentialsConfigured {
